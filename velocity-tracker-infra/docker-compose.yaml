@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Redis Instance for Sliding Window Lua Execution
+  redis:
+    image: redis:7.2-alpine
+    container_name: velocity-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Zookeeper for Kafka Coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: velocity-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: velocity-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  # Automation Service: Creates the 32-partition topic on startup
+  # Automation Service: Creates the 32-partition topic on startup
+  # Automation Service: Uses the standard Apache Kafka image to create the 32-partition topic
+  kafka-init-topics:
+    image: apache/kafka:latest
+    container_name: velocity-kafka-init
+    depends_on:
+      - kafka
+    entrypoint: [ "sh", "-c", "sleep 5 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server velocity-kafka:9092 --create --topic payment-events --partitions 32 --replication-factor 1 --if-not-exists" ]
+volumes:
+  redis_data:
+  kafka_data:
