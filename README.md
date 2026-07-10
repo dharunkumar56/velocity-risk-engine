@@ -1,5 +1,3 @@
-Your content is strong, but it would benefit from cleaner Markdown, consistent headings, proper code blocks, and a more professional GitHub README structure. Here's a polished version.
-
 # Velocity Tracker
 
 An ultra-low-latency, highly concurrent **Fraud Risk Management (FRM)** pipeline designed to ingest, process, and evaluate financial transaction velocity limits in real time.
