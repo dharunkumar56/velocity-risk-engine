@@ -2,20 +2,22 @@
 
 An ultra-low-latency, highly concurrent **Fraud Risk Management (FRM)** pipeline designed to ingest, process, and evaluate financial transaction velocity limits in real time.
 
-Built with **Go**, **Apache Kafka**, and **Redis**, the system leverages an event-driven architecture and a Redis Lua-powered sliding window evaluation engine to process financial transactions at high throughput.
-
-### Performance Highlights
-
-* **80,000+ Evaluation TPS** (Kafka → Redis evaluation pipeline)
-* **23,500+ End-to-End RPS** (Complete ingestion-to-evaluation lifecycle)
-* **3.2 Million Transactions** processed during benchmark testing
-* **40,000 Concurrent Users** simulated
+Built with **Go**, **Apache Kafka**, and **Redis**, the system leverages an event-driven architecture and a **Redis Lua-powered sliding window evaluation engine** to process financial transactions at massive throughput while maintaining strong consistency and fault tolerance.
 
 ---
 
-# Architecture
+# 🚀 Performance Highlights
 
-The pipeline follows an asynchronous event-driven design that eliminates synchronous bottlenecks and allows downstream services to scale independently under heavy transaction loads.
+- **80,000+ Evaluation TPS** (Kafka → Redis evaluation pipeline)
+- **23,598 End-to-End RPS** (Complete ingestion-to-evaluation lifecycle)
+- **3.2 Million Transactions** processed during benchmark testing
+- **40,000 Concurrent Users** simulated
+
+---
+
+# 🏗️ Architecture
+
+The pipeline follows an asynchronous event-driven architecture that removes synchronous bottlenecks and allows downstream services to scale independently under sustained high traffic.
 
 ```text
                  +----------------------+
@@ -51,141 +53,181 @@ The pipeline follows an asynchronous event-driven design that eliminates synchro
 
 ---
 
-# Components
+# 🧩 Components
 
 ## Load Generator (`velocity-tracker-client`)
 
-A high-performance benchmarking client that simulates over **40,000 unique users** generating millions of asynchronous payment requests.
-
-**Responsibilities**
-
-* Generates realistic transaction traffic
-* Simulates concurrent users
-* Measures end-to-end throughput
+A high-performance benchmarking client that simulates over **40,000 unique users** generating millions of asynchronous payment requests. It measures end-to-end throughput under sustained production-scale traffic.
 
 ---
 
 ## Ingestion Gateway (`velocity-tracker-ingestion`)
 
-A lightweight stateless HTTP gateway responsible for accepting transaction requests and forwarding them into Kafka.
+A lightweight stateless HTTP gateway responsible for:
 
-**Responsibilities**
+- Receiving transaction requests
+- Validating request payloads
+- Parsing incoming data
+- Routing events to Kafka using `user_id` as the partition key
 
-* Request validation
-* Payload parsing
-* Kafka producer
-* User-based partition routing
+Because the service is stateless, multiple ingestion nodes can be horizontally scaled behind a load balancer.
 
 ---
 
 ## Apache Kafka
 
-Kafka serves as the durable event backbone.
+Kafka acts as the durable event backbone.
 
-Transactions are partitioned using `user_id`, guaranteeing ordering for every individual account while allowing parallel processing across users.
+Key characteristics:
 
-**Configuration**
-
-* 32 partitions
-* Ordered processing per user
-* High-throughput asynchronous buffering
+- **32 partitions**
+- `user_id` used as the message key
+- Strict ordering maintained for every individual account
+- Massive parallelism across different users
+- Durable message persistence
 
 ---
 
 ## Risk Engine (`velocity-tracker-engine`)
 
-A highly concurrent processing service that continuously drains Kafka partitions and evaluates incoming transactions.
+A highly concurrent processing service responsible for:
 
-### Features
-
-* 128 concurrent worker goroutines
-* Parallel Kafka consumption
-* Redis pipelining
-* Atomic Lua-based evaluations
-
----
-
-## Redis Evaluation Engine
-
-Redis stores each user's transaction timestamps inside **Sorted Sets (ZSETs)**.
-
-Every incoming transaction executes a Lua script atomically, performing:
-
-1. Remove expired timestamps
-2. Insert current transaction
-3. Count active transactions
-4. Determine whether the velocity threshold has been exceeded
-
-Because the entire workflow executes inside a single Lua script, no distributed locks or application-level synchronization are required.
+- Continuously consuming Kafka partitions
+- Running **128 concurrent worker goroutines**
+- Redis pipelining
+- Atomic Lua-powered velocity evaluation
+- Manual Kafka offset management
 
 ---
 
-# Performance Benchmarks
+# 🧠 Design Optimizations & Enterprise Fault Tolerance
 
-## Test Environment
+## 1. Atomic Sliding Window Evaluation
 
-| Item               |                     Value |
-| ------------------ | ------------------------: |
-| Hardware           | Apple Silicon MacBook Air |
-| Total Transactions |                 3,200,000 |
-| Concurrent Users   |                    40,000 |
-| Kafka Partitions   |                        32 |
-| Risk Workers       |                       128 |
+Velocity checks execute entirely inside Redis using a localized Lua script.
 
-### Throughput
+Each evaluation atomically performs:
 
-| Metric              |          Result |
-| ------------------- | --------------: |
-| Evaluation Pipeline | **80,000+ TPS** |
-| End-to-End Pipeline |  **23,598 RPS** |
+- `ZREMRANGEBYSCORE`
+- `ZADD`
+- `ZCARD`
+- `EXPIRE`
 
----
+Bundling these operations into a single Redis transaction guarantees:
 
-# Design Optimizations
-
-## Atomic Sliding Window Evaluation
-
-Velocity checks execute entirely inside Redis using a Lua script.
-
-Operations performed atomically:
-
-* `ZREMRANGEBYSCORE`
-* `ZADD`
-* `ZCARD`
-
-This guarantees consistency while avoiding race conditions and application-level locking.
+- Atomic execution
+- Strong consistency
+- Zero race conditions
+- No distributed application locks
+- Safe concurrent execution across all 128 workers
 
 ---
 
-## Concurrent Worker Pool
+## 2. Reliable Lifecycle Management (Graceful Shutdown)
 
-The risk engine launches **128 worker goroutines** with an optimized connection pool to hide Redis network latency and maximize throughput.
+To prevent:
 
----
+- dropped transactions
+- half-processed requests
+- broken network sockets
 
-## Kafka Batch Consumption
+the engine uses explicit context propagation.
 
-Kafka consumers use large fetch sizes to reduce socket overhead and improve throughput.
+Workers consume Kafka using:
 
-```text
-MinBytes = 100 KB
+```go
+reader.FetchMessage(ctx)
 ```
 
-This significantly reduces context switching during heavy workloads.
+Upon receiving `SIGINT` or `SIGTERM`:
+
+- Context cancellation propagates through all workers
+- In-flight requests finish processing
+- Redis operations complete
+- Kafka offsets commit successfully
+- Workers exit cleanly within milliseconds
 
 ---
 
-# Getting Started
+## 3. At-Least-Once Delivery with Manual Commits
+
+Automatic offset commits were intentionally disabled.
+
+Instead, offsets are committed only after Redis evaluation succeeds.
+
+```go
+reader.CommitMessages(ctx, msg)
+```
+
+Benefits:
+
+- No message loss
+- At-least-once delivery guarantees
+- Safe recovery after unexpected crashes
+- Transactions are automatically replayed if a worker fails before committing
+
+---
+
+## 4. Dead-Letter Queue (DLQ)
+
+Malformed JSON or schema violations should never stop the processing pipeline.
+
+If deserialization fails:
+
+1. Error is logged
+2. Original payload is forwarded to
+
+```
+payment-events-dlq
+```
+
+This isolates poison-pill messages while allowing healthy traffic to continue uninterrupted.
+
+---
+
+## 5. Highly Concurrent Worker Pool
+
+The risk engine maximizes throughput using:
+
+- **128 worker goroutines**
+- Redis connection pool (`PoolSize = 300`)
+- Redis pipelining
+- Kafka batch fetching (`MinBytes = 100 KB`)
+
+These optimizations significantly reduce:
+
+- Network round trips
+- Context switches
+- CPU scheduling overhead
+
+resulting in sustained high throughput during heavy traffic bursts.
+
+---
+
+# 📊 Performance Benchmarks
+
+| Metric | Result |
+|---------|--------|
+| Total Transactions | **3,200,000** |
+| Concurrent Users | **40,000** |
+| Kafka Partitions | **32** |
+| Risk Workers | **128** |
+| Evaluation Pipeline | **80,000+ TPS** |
+| End-to-End Pipeline | **23,598 RPS** |
+
+---
+
+# 🚀 Getting Started
 
 ## Prerequisites
 
-* Go 1.22+
-* Docker
-* Docker Compose
+- Go **1.22+**
+- Docker
+- Docker Compose
 
 ---
 
-# 1. Start Infrastructure
+## 1. Start Infrastructure
 
 ```bash
 cd velocity-tracker-infra
@@ -196,11 +238,9 @@ docker compose up -d
 
 ---
 
-# 2. Create Kafka Topic
+## 2. Create Kafka Topic
 
-Wait a few seconds for Kafka to finish starting.
-
-Create the topic:
+Wait approximately **5 seconds** for Kafka to initialize.
 
 ```bash
 docker exec -it velocity-kafka \
@@ -212,101 +252,67 @@ kafka-topics \
 --replication-factor 1
 ```
 
-Verify:
-
-```bash
-docker exec -it velocity-kafka \
-kafka-topics \
---bootstrap-server localhost:9092 \
---list
-```
-
-Expected output:
-
-```text
-payment-events
-```
-
 ---
 
-# 3. Start the Risk Engine
+## 3. Start Services
+
+Open three separate terminals.
+
+### Risk Engine
 
 ```bash
 cd velocity-tracker-engine
-
 go run main.go
 ```
 
-Expected output:
-
-```text
-🚀 Risk Engine spinning up 128 parallel evaluation workers...
-```
-
----
-
-# 4. Start the Ingestion Gateway
+### Ingestion Gateway
 
 ```bash
 cd velocity-tracker-ingestion
-
 go run main.go
 ```
 
----
-
-# 5. Start the Load Generator
+### Load Generator
 
 ```bash
 cd velocity-tracker-client
-
 go run main.go
 ```
 
 ---
 
-# Runtime Output
+# 🛠️ Technology Stack
 
-During execution, the Risk Engine periodically reports progress as users exceed configured velocity thresholds.
-
-Example:
-
-```text
-🛡️ [SYSTEM HEALTHY] Total unique users flagged so far: 5000 / 40000
-
-🛡️ [SYSTEM HEALTHY] Total unique users flagged so far: 10000 / 40000
-
-...
-
-🛡️ [SYSTEM HEALTHY] Total unique users flagged so far: 40000 / 40000
-
-🛑 Gracefully stepping down Evaluation cluster...
-
-📊 [FINAL METRIC] Total unique users successfully flagged: 40000
-```
+| Category | Technology |
+|----------|------------|
+| Language | Go |
+| Message Broker | Apache Kafka |
+| Storage | Redis |
+| Redis Features | Lua Scripting, Sorted Sets (ZSET), Pipelining |
+| Containerization | Docker |
+| Orchestration | Docker Compose |
 
 ---
 
-# Technology Stack
+# 🎯 Key Features
 
-* Go
-* Apache Kafka
-* Redis
-* Redis Lua Scripting
-* Docker
-* Docker Compose
+- Event-driven asynchronous architecture
+- Stateless ingestion layer
+- Atomic Redis Lua evaluation
+- Sliding window fraud detection
+- Kafka partition ordering per user
+- 128 concurrent worker pool
+- Redis pipelining
+- Manual Kafka offset commits
+- At-least-once delivery semantics
+- Graceful shutdown handling
+- Dead-letter queue isolation
+- Production-scale benchmarking
+- Horizontal scalability
+- High-throughput low-latency processing
 
 ---
 
-# Key Characteristics
+## License
 
-* Event-driven architecture
-* Horizontal scalability
-* Ordered per-user processing
-* Lock-free atomic fraud evaluation
-* Sliding-window velocity detection
-* High-throughput concurrent worker model
-* Optimized Kafka batching
-* Redis Sorted Set (ZSET) storage
-
-This version is cleaner, follows common GitHub README conventions, uses consistent Markdown formatting, and is ready to paste directly into your repository. It also reads more professionally for recruiters and hiring managers while preserving your benchmark results and architecture details.
+This project is provided for educational and portfolio purposes.
