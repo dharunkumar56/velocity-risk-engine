@@ -312,7 +312,3 @@ go run main.go
 - High-throughput low-latency processing
 
 ---
-
-## License
-
-This project is provided for educational and portfolio purposes.
